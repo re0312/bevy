@@ -1,6 +1,10 @@
-use crate::{color_difference::EuclideanDistance, Alpha, Luminance, Mix, StandardColor};
+use std::ops::{Div, Mul};
+
+use crate::{
+    color_difference::EuclideanDistance, Alpha, ClampColor, Luminance, Mix, StandardColor,
+};
 use bevy_math::Vec4;
-use bevy_reflect::{Reflect, ReflectDeserialize, ReflectSerialize};
+use bevy_reflect::prelude::*;
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
@@ -10,7 +14,7 @@ use serde::{Deserialize, Serialize};
 #[doc = include_str!("../docs/diagrams/model_graph.svg")]
 /// </div>
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Reflect)]
-#[reflect(PartialEq, Serialize, Deserialize)]
+#[reflect(PartialEq, Serialize, Deserialize, Default)]
 #[repr(C)]
 pub struct LinearRgba {
     /// The red channel. [0.0, 1.0]
@@ -48,6 +52,30 @@ impl LinearRgba {
         green: 0.0,
         blue: 0.0,
         alpha: 0.0,
+    };
+
+    /// A fully red color with full alpha.
+    pub const RED: Self = Self {
+        red: 1.0,
+        green: 0.0,
+        blue: 0.0,
+        alpha: 1.0,
+    };
+
+    /// A fully green color with full alpha.
+    pub const GREEN: Self = Self {
+        red: 0.0,
+        green: 1.0,
+        blue: 0.0,
+        alpha: 1.0,
+    };
+
+    /// A fully blue color with full alpha.
+    pub const BLUE: Self = Self {
+        red: 0.0,
+        green: 0.0,
+        blue: 1.0,
+        alpha: 1.0,
     };
 
     /// An invalid color.
@@ -127,6 +155,26 @@ impl LinearRgba {
             self.mix_assign(Self::new(1.0, 1.0, 1.0, self.alpha), adjustment);
         }
     }
+
+    /// Converts the color into a [f32; 4] array in RGBA order.
+    ///
+    /// This is useful for passing the color to a shader.
+    pub fn to_f32_array(&self) -> [f32; 4] {
+        [self.red, self.green, self.blue, self.alpha]
+    }
+
+    /// Converts this color to a u32.
+    ///
+    /// Maps the RGBA channels in RGBA order to a little-endian byte array (GPUs are little-endian).
+    /// `A` will be the most significant byte and `R` the least significant.
+    pub fn as_u32(&self) -> u32 {
+        u32::from_le_bytes([
+            (self.red * 255.0) as u8,
+            (self.green * 255.0) as u8,
+            (self.blue * 255.0) as u8,
+            (self.alpha * 255.0) as u8,
+        ])
+    }
 }
 
 impl Default for LinearRgba {
@@ -193,6 +241,11 @@ impl Alpha for LinearRgba {
     fn alpha(&self) -> f32 {
         self.alpha
     }
+
+    #[inline]
+    fn set_alpha(&mut self, alpha: f32) {
+        self.alpha = alpha;
+    }
 }
 
 impl EuclideanDistance for LinearRgba {
@@ -202,6 +255,24 @@ impl EuclideanDistance for LinearRgba {
         let dg = self.green - other.green;
         let db = self.blue - other.blue;
         dr * dr + dg * dg + db * db
+    }
+}
+
+impl ClampColor for LinearRgba {
+    fn clamped(&self) -> Self {
+        Self {
+            red: self.red.clamp(0., 1.),
+            green: self.green.clamp(0., 1.),
+            blue: self.blue.clamp(0., 1.),
+            alpha: self.alpha.clamp(0., 1.),
+        }
+    }
+
+    fn is_within_bounds(&self) -> bool {
+        (0. ..=1.).contains(&self.red)
+            && (0. ..=1.).contains(&self.green)
+            && (0. ..=1.).contains(&self.blue)
+            && (0. ..=1.).contains(&self.alpha)
     }
 }
 
@@ -224,6 +295,48 @@ impl From<LinearRgba> for wgpu::Color {
             g: color.green as f64,
             b: color.blue as f64,
             a: color.alpha as f64,
+        }
+    }
+}
+
+/// All color channels are scaled directly,
+/// but alpha is unchanged.
+///
+/// Values are not clamped.
+impl Mul<f32> for LinearRgba {
+    type Output = Self;
+
+    fn mul(self, rhs: f32) -> Self {
+        Self {
+            red: self.red * rhs,
+            green: self.green * rhs,
+            blue: self.blue * rhs,
+            alpha: self.alpha,
+        }
+    }
+}
+
+impl Mul<LinearRgba> for f32 {
+    type Output = LinearRgba;
+
+    fn mul(self, rhs: LinearRgba) -> LinearRgba {
+        rhs * self
+    }
+}
+
+/// All color channels are scaled directly,
+/// but alpha is unchanged.
+///
+/// Values are not clamped.
+impl Div<f32> for LinearRgba {
+    type Output = Self;
+
+    fn div(self, rhs: f32) -> Self {
+        Self {
+            red: self.red / rhs,
+            green: self.green / rhs,
+            blue: self.blue / rhs,
+            alpha: self.alpha,
         }
     }
 }
@@ -361,5 +474,22 @@ mod tests {
         let lighter2 = lighter1.lighter(0.1);
         let twice_as_light = color.lighter(0.2);
         assert!(lighter2.distance_squared(&twice_as_light) < 0.0001);
+    }
+
+    #[test]
+    fn test_clamp() {
+        let color_1 = LinearRgba::rgb(2., -1., 0.4);
+        let color_2 = LinearRgba::rgb(0.031, 0.749, 1.);
+        let mut color_3 = LinearRgba::rgb(-1., 1., 1.);
+
+        assert!(!color_1.is_within_bounds());
+        assert_eq!(color_1.clamped(), LinearRgba::rgb(1., 0., 0.4));
+
+        assert!(color_2.is_within_bounds());
+        assert_eq!(color_2, color_2.clamped());
+
+        color_3.clamp();
+        assert!(color_3.is_within_bounds());
+        assert_eq!(color_3, LinearRgba::rgb(0., 1., 1.));
     }
 }

@@ -230,6 +230,6 @@ pub fn no_automatic_skin_batching(
     }
 
     for entity in &query {
-        commands.entity(entity).insert(NoAutomaticBatching);
+        commands.entity(entity).try_insert(NoAutomaticBatching);
     }
 }

@@ -1,5 +1,5 @@
-use crate::{Alpha, Laba, LinearRgba, Luminance, Mix, Srgba, StandardColor, Xyza};
-use bevy_reflect::{Reflect, ReflectDeserialize, ReflectSerialize};
+use crate::{Alpha, ClampColor, Laba, LinearRgba, Luminance, Mix, Srgba, StandardColor, Xyza};
+use bevy_reflect::prelude::*;
 use serde::{Deserialize, Serialize};
 
 /// Color in LCH color space, with alpha
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 #[doc = include_str!("../docs/diagrams/model_graph.svg")]
 /// </div>
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Reflect)]
-#[reflect(PartialEq, Serialize, Deserialize)]
+#[reflect(PartialEq, Serialize, Deserialize, Default)]
 pub struct Lcha {
     /// The lightness channel. [0.0, 1.5]
     pub lightness: f32,
@@ -70,6 +70,35 @@ impl Lcha {
     pub const fn with_lightness(self, lightness: f32) -> Self {
         Self { lightness, ..self }
     }
+
+    /// Generate a deterministic but [quasi-randomly distributed](https://en.wikipedia.org/wiki/Low-discrepancy_sequence)
+    /// color from a provided `index`.
+    ///
+    /// This can be helpful for generating debug colors.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use bevy_color::Lcha;
+    /// // Unique color for an entity
+    /// # let entity_index = 123;
+    /// // let entity_index = entity.index();
+    /// let color = Lcha::sequential_dispersed(entity_index);
+    ///
+    /// // Palette with 5 distinct hues
+    /// let palette = (0..5).map(Lcha::sequential_dispersed).collect::<Vec<_>>();
+    /// ```
+    pub fn sequential_dispersed(index: u32) -> Self {
+        const FRAC_U32MAX_GOLDEN_RATIO: u32 = 2654435769; // (u32::MAX / Φ) rounded up
+        const RATIO_360: f32 = 360.0 / u32::MAX as f32;
+
+        // from https://extremelearning.com.au/unreasonable-effectiveness-of-quasirandom-sequences/
+        //
+        // Map a sequence of integers (eg: 154, 155, 156, 157, 158) into the [0.0..1.0] range,
+        // so that the closer the numbers are, the larger the difference of their image.
+        let hue = index.wrapping_mul(FRAC_U32MAX_GOLDEN_RATIO) as f32 * RATIO_360;
+        Self::lch(0.75, 0.35, hue)
+    }
 }
 
 impl Default for Lcha {
@@ -101,6 +130,11 @@ impl Alpha for Lcha {
     fn alpha(&self) -> f32 {
         self.alpha
     }
+
+    #[inline]
+    fn set_alpha(&mut self, alpha: f32) {
+        self.alpha = alpha;
+    }
 }
 
 impl Luminance for Lcha {
@@ -129,6 +163,24 @@ impl Luminance for Lcha {
             self.hue,
             self.alpha,
         )
+    }
+}
+
+impl ClampColor for Lcha {
+    fn clamped(&self) -> Self {
+        Self {
+            lightness: self.lightness.clamp(0., 1.5),
+            chroma: self.chroma.clamp(0., 1.5),
+            hue: self.hue.rem_euclid(360.),
+            alpha: self.alpha.clamp(0., 1.),
+        }
+    }
+
+    fn is_within_bounds(&self) -> bool {
+        (0. ..=1.5).contains(&self.lightness)
+            && (0. ..=1.5).contains(&self.chroma)
+            && (0. ..=360.).contains(&self.hue)
+            && (0. ..=1.).contains(&self.alpha)
     }
 }
 
@@ -278,5 +330,22 @@ mod tests {
             }
             assert_approx_eq!(color.lch.alpha, lcha.alpha, 0.001);
         }
+    }
+
+    #[test]
+    fn test_clamp() {
+        let color_1 = Lcha::lch(-1., 2., 400.);
+        let color_2 = Lcha::lch(1., 1.5, 249.54);
+        let mut color_3 = Lcha::lch(-0.4, 1., 1.);
+
+        assert!(!color_1.is_within_bounds());
+        assert_eq!(color_1.clamped(), Lcha::lch(0., 1.5, 40.));
+
+        assert!(color_2.is_within_bounds());
+        assert_eq!(color_2, color_2.clamped());
+
+        color_3.clamp();
+        assert!(color_3.is_within_bounds());
+        assert_eq!(color_3, Lcha::lch(0., 1., 1.));
     }
 }
