@@ -1,7 +1,7 @@
 use crate::{component::Tick, world::unsafe_world_cell::UnsafeWorldCell};
 use std::ops::Range;
 
-use super::{QueryData, QueryFilter, QueryItem, QueryState};
+use super::{QueryData, QueryFilter, QueryItem, QueryIter, QueryState};
 
 /// Dictates how a parallel query chunks up large tables/archetypes
 /// during iteration.
@@ -109,6 +109,19 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryParIter<'w, 's, D, F> {
     /// [`ComputeTaskPool`]: bevy_tasks::ComputeTaskPool
     #[inline]
     pub fn for_each<FN: Fn(QueryItem<'w, D>) + Send + Sync + Clone>(self, func: FN) {
+        let func = |iter: QueryIter<'w, 's, D, F>| iter.for_each(|item| func(item));
+        self.for_each_chunk(func);
+    }
+
+    /// Runs `func` on each query result in parallel.
+    ///
+    /// # Panics
+    /// If the [`ComputeTaskPool`] is not initialized. If using this from a query that is being
+    /// initialized and run from the ECS scheduler, this should never panic.
+    ///
+    /// [`ComputeTaskPool`]: bevy_tasks::ComputeTaskPool
+    #[inline]
+    pub fn for_each_chunk<FN: Fn(QueryIter<'w, 's, D, F>) + Send + Sync + Clone>(self, func: FN) {
         #[cfg(any(target_arch = "wasm32", not(feature = "multi-threaded")))]
         {
             // SAFETY:
@@ -118,9 +131,10 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryParIter<'w, 's, D, F> {
             // Query or a World, which ensures that multiple aliasing QueryParIters cannot exist
             // at the same time.
             unsafe {
-                self.state
-                    .iter_unchecked_manual(self.world, self.last_run, self.this_run)
-                    .for_each(func);
+                let iter =
+                    self.state
+                        .iter_unchecked_manual(self.world, self.last_run, self.this_run);
+                func(iter);
             }
         }
         #[cfg(all(not(target_arch = "wasm32"), feature = "multi-threaded"))]
@@ -129,16 +143,17 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryParIter<'w, 's, D, F> {
             if thread_count <= 1 {
                 // SAFETY: See the safety comment above.
                 unsafe {
-                    self.state
-                        .iter_unchecked_manual(self.world, self.last_run, self.this_run)
-                        .for_each(func);
+                    let iter =
+                        self.state
+                            .iter_unchecked_manual(self.world, self.last_run, self.this_run);
+                    func(iter);
                 }
             } else {
                 // Need a batch size of at least 1.
                 let batch_size = self.get_batch_size(thread_count).max(1);
                 // SAFETY: See the safety comment above.
                 unsafe {
-                    self.state.par_for_each_unchecked_manual(
+                    self.state.par_for_each_chunk_unchecked_manual(
                         self.world,
                         batch_size,
                         func,

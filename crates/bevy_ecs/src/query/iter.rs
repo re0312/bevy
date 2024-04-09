@@ -41,6 +41,75 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryIter<'w, 's, D, F> {
         }
     }
 
+    /// reset iter cursor to specific range
+    ///
+    /// # Safety
+    /// - `world` must have permission to access any of the components registered in `query_state`.
+    /// - `world` must be the same one used to initialize `query_state`.
+    /// - `start_storage` id and `iter` must be subset of `query_state`'s `matched_storage_ids`
+    /// - `start_storage` range must be in `[0, `start_storage` entity_count)`
+    pub(super) unsafe fn reset_cursor(
+        &mut self,
+        world: UnsafeWorldCell<'w>,
+        start_storage: Option<(StorageId, Range<usize>)>,
+        iter: std::slice::Iter<'s, StorageId>,
+    ) {
+        if let Some((storage_id, range)) = start_storage {
+            if D::IS_DENSE && F::IS_DENSE {
+                let table = world
+                    .storages()
+                    .tables
+                    .get(storage_id.table_id)
+                    .debug_checked_unwrap();
+                // SAFETY: `table` is from the world that `fetch/filter` were created for,
+                // `fetch_state`/`filter_state` are the states that `fetch/filter` were initialized with
+                unsafe {
+                    D::set_table(&mut self.cursor.fetch, &self.query_state.fetch_state, table);
+                    F::set_table(
+                        &mut self.cursor.filter,
+                        &self.query_state.filter_state,
+                        table,
+                    );
+                }
+                self.cursor.table_entities = table.entities();
+            } else {
+                let archetype = world
+                    .archetypes()
+                    .get(storage_id.archetype_id)
+                    .debug_checked_unwrap();
+                let table = world
+                    .storages()
+                    .tables
+                    .get(archetype.table_id())
+                    .debug_checked_unwrap();
+                // SAFETY: `archetype` and `tables` are from the world that `fetch/filter` were created for,
+                // `fetch_state`/`filter_state` are the states that `fetch/filter` were initialized with
+                unsafe {
+                    D::set_archetype(
+                        &mut self.cursor.fetch,
+                        &self.query_state.fetch_state,
+                        archetype,
+                        table,
+                    );
+                    F::set_archetype(
+                        &mut self.cursor.filter,
+                        &self.query_state.filter_state,
+                        archetype,
+                        table,
+                    );
+                }
+                self.cursor.archetype_entities = archetype.entities();
+            };
+            self.cursor.current_len = range.end;
+            self.cursor.current_row = range.start;
+        } else {
+            self.cursor.current_len = 0;
+            self.cursor.current_row = 0;
+        }
+
+        self.cursor.storage_id_iter = iter;
+    }
+
     /// Executes the equivalent of [`Iterator::for_each`] over a contiguous segment
     /// from a table.
     ///

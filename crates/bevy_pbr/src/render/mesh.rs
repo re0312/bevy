@@ -284,53 +284,55 @@ pub fn extract_meshes(
         )>,
     >,
 ) {
-    meshes_query.par_iter().for_each(
-        |(
-            entity,
-            view_visibility,
-            transform,
-            previous_transform,
-            handle,
-            not_shadow_receiver,
-            transmitted_receiver,
-            not_shadow_caster,
-            no_automatic_batching,
-        )| {
-            if !view_visibility.get() {
-                return;
-            }
-            let transform = transform.affine();
-            let previous_transform = previous_transform.map(|t| t.0).unwrap_or(transform);
-            let mut flags = if not_shadow_receiver {
-                MeshFlags::empty()
-            } else {
-                MeshFlags::SHADOW_RECEIVER
-            };
-            if transmitted_receiver {
-                flags |= MeshFlags::TRANSMITTED_SHADOW_RECEIVER;
-            }
-            if transform.matrix3.determinant().is_sign_positive() {
-                flags |= MeshFlags::SIGN_DETERMINANT_MODEL_3X3;
-            }
-            let transforms = MeshTransforms {
-                transform: (&transform).into(),
-                previous_transform: (&previous_transform).into(),
-                flags: flags.bits(),
-            };
-            thread_local_queues.scope(|queue| {
-                queue.push((
+    meshes_query.par_iter().for_each_chunk(|task_iter| {
+        thread_local_queues.scope(|queue| {
+            task_iter.for_each(
+                |(
                     entity,
-                    RenderMeshInstance {
-                        mesh_asset_id: handle.id(),
-                        transforms,
-                        shadow_caster: !not_shadow_caster,
-                        material_bind_group_id: AtomicMaterialBindGroupId::default(),
-                        automatic_batching: !no_automatic_batching,
-                    },
-                ));
-            });
-        },
-    );
+                    view_visibility,
+                    transform,
+                    previous_transform,
+                    handle,
+                    not_shadow_receiver,
+                    transmitted_receiver,
+                    not_shadow_caster,
+                    no_automatic_batching,
+                )| {
+                    if !view_visibility.get() {
+                        return;
+                    }
+                    let transform = transform.affine();
+                    let previous_transform = previous_transform.map(|t| t.0).unwrap_or(transform);
+                    let mut flags = if not_shadow_receiver {
+                        MeshFlags::empty()
+                    } else {
+                        MeshFlags::SHADOW_RECEIVER
+                    };
+                    if transmitted_receiver {
+                        flags |= MeshFlags::TRANSMITTED_SHADOW_RECEIVER;
+                    }
+                    if transform.matrix3.determinant().is_sign_positive() {
+                        flags |= MeshFlags::SIGN_DETERMINANT_MODEL_3X3;
+                    }
+                    let transforms = MeshTransforms {
+                        transform: (&transform).into(),
+                        previous_transform: (&previous_transform).into(),
+                        flags: flags.bits(),
+                    };
+                    queue.push((
+                        entity,
+                        RenderMeshInstance {
+                            mesh_asset_id: handle.id(),
+                            transforms,
+                            shadow_caster: !not_shadow_caster,
+                            material_bind_group_id: AtomicMaterialBindGroupId::default(),
+                            automatic_batching: !no_automatic_batching,
+                        },
+                    ));
+                },
+            );
+        });
+    });
 
     render_mesh_instances.clear();
     for queue in thread_local_queues.iter_mut() {

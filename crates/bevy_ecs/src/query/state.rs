@@ -1483,6 +1483,115 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         });
     }
 
+    /// Runs `func` on each query result in parallel for the given [`World`], where the last change and
+    /// the current change tick are given. This is faster than the equivalent
+    /// `iter()` method, but cannot be chained like a normal [`Iterator`].
+    ///
+    /// # Panics
+    /// The [`ComputeTaskPool`] is not initialized. If using this from a query that is being
+    /// initialized and run from the ECS scheduler, this should never panic.
+    ///
+    /// # Safety
+    ///
+    /// This does not check for mutable query correctness. To be safe, make sure mutable queries
+    /// have unique access to the components they query.
+    /// This does not validate that `world.id()` matches `self.world_id`. Calling this on a `world`
+    /// with a mismatched [`WorldId`] is unsound.
+    ///
+    /// [`ComputeTaskPool`]: bevy_tasks::ComputeTaskPool
+    #[cfg(all(not(target_arch = "wasm32"), feature = "multi-threaded"))]
+    pub(crate) unsafe fn par_for_each_chunk_unchecked_manual<
+        'w,
+        's,
+        FN: Fn(QueryIter<'w, 's, D, F>) + Send + Sync + Clone,
+    >(
+        &'s self,
+        world: UnsafeWorldCell<'w>,
+        batch_size: usize,
+        func: FN,
+        last_run: Tick,
+        this_run: Tick,
+    ) {
+        // NOTE: If you are changing query iteration code, remember to update the following places, where relevant:
+        // QueryIter, QueryIterationCursor, QueryManyIter, QueryCombinationIter, QueryState::for_each_unchecked_manual, QueryState::par_for_each_unchecked_manual
+        use arrayvec::ArrayVec;
+
+        bevy_tasks::ComputeTaskPool::get().scope(|scope| {
+            // SAFETY: We only access table data that has been registered in `self.archetype_component_access`.
+            let tables = unsafe { &world.storages().tables };
+            let archetypes = world.archetypes();
+            let mut batch_queue = ArrayVec::new();
+            let mut queue_entity_count = 0;
+
+            // submit a list of storages which smaller than batch_size as single task
+            let submit_batch_queue = |queue: &mut ArrayVec<StorageId, 128>| {
+                if queue.is_empty() {
+                    return;
+                }
+                let queue = std::mem::take(queue);
+                let func = func.clone();
+                scope.spawn(async move {
+                    #[cfg(feature = "trace")]
+                    let _span = self.par_iter_span.enter();
+                    let mut iter = self.iter_unchecked_manual(world, last_run, this_run);
+                    let storage_iter: std::slice::Iter<'s, StorageId> =
+                        // safety: iter will be dropped afer task complete
+                        unsafe { std::mem::transmute(queue.iter()) };
+                    iter.reset_cursor(world, None, storage_iter);
+                    func(iter);
+                });
+            };
+
+            // submit single storage larger than batch_size
+            let submit_single = |count, storage_id: StorageId| {
+                for offset in (0..count).step_by(batch_size) {
+                    let func = func.clone();
+                    let len = batch_size.min(count - offset);
+                    let batch = offset..offset + len;
+                    scope.spawn(async move {
+                        #[cfg(feature = "trace")]
+                        let _span = self.par_iter_span.enter();
+                        let mut iter = self.iter_unchecked_manual(world, last_run, this_run);
+                        iter.reset_cursor(world, Some((storage_id, batch)), [].iter());
+                        func(iter);
+                    });
+                }
+            };
+
+            let storage_entity_count = |storage_id: StorageId| -> usize {
+                if D::IS_DENSE && F::IS_DENSE {
+                    tables[storage_id.table_id].entity_count()
+                } else {
+                    archetypes[storage_id.archetype_id].len()
+                }
+            };
+
+            for storage_id in &self.matched_storage_ids {
+                let count = storage_entity_count(*storage_id);
+
+                // skip empty storage
+                if count == 0 {
+                    continue;
+                }
+                // immediately submit large storage
+                if count >= batch_size {
+                    submit_single(count, *storage_id);
+                    continue;
+                }
+                // merge small storage
+                batch_queue.push(*storage_id);
+                queue_entity_count += count;
+
+                // submit batch_queue
+                if queue_entity_count >= batch_size || batch_queue.is_full() {
+                    submit_batch_queue(&mut batch_queue);
+                    queue_entity_count = 0;
+                }
+            }
+            submit_batch_queue(&mut batch_queue);
+        });
+    }
+
     /// Returns a single immutable query result when there is exactly one entity matching
     /// the query.
     ///
