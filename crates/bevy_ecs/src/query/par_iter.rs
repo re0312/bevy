@@ -109,11 +109,48 @@ impl<'w, 's, D: QueryData, F: QueryFilter> QueryParIter<'w, 's, D, F> {
     /// [`ComputeTaskPool`]: bevy_tasks::ComputeTaskPool
     #[inline]
     pub fn for_each<FN: Fn(QueryItem<'w, D>) + Send + Sync + Clone>(self, func: FN) {
-        let func = |iter: QueryIter<'w, 's, D, F>| iter.for_each(|item| func(item));
-        self.for_each_chunk(func);
+        #[cfg(any(target_arch = "wasm32", not(feature = "multi-threaded")))]
+        {
+            // SAFETY:
+            // This method can only be called once per instance of QueryParIter,
+            // which ensures that mutable queries cannot be executed multiple times at once.
+            // Mutable instances of QueryParIter can only be created via an exclusive borrow of a
+            // Query or a World, which ensures that multiple aliasing QueryParIters cannot exist
+            // at the same time.
+            unsafe {
+                self.state
+                    .iter_unchecked_manual(self.world, self.last_run, self.this_run)
+                    .for_each(func);
+            }
+        }
+        #[cfg(all(not(target_arch = "wasm32"), feature = "multi-threaded"))]
+        {
+            let thread_count = bevy_tasks::ComputeTaskPool::get().thread_num();
+            if thread_count <= 1 {
+                // SAFETY: See the safety comment above.
+                unsafe {
+                    self.state
+                        .iter_unchecked_manual(self.world, self.last_run, self.this_run)
+                        .for_each(func);
+                }
+            } else {
+                // Need a batch size of at least 1.
+                let batch_size = self.get_batch_size(thread_count).max(1);
+                // SAFETY: See the safety comment above.
+                unsafe {
+                    self.state.par_for_each_unchecked_manual(
+                        self.world,
+                        batch_size,
+                        func,
+                        self.last_run,
+                        self.this_run,
+                    );
+                }
+            }
+        }
     }
 
-    /// Runs `func` on each query result in parallel.
+    /// Splits iterator into chunks , performing `func` on each chunk.
     ///
     /// # Panics
     /// If the [`ComputeTaskPool`] is not initialized. If using this from a query that is being
