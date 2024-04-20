@@ -6,7 +6,7 @@ use bevy_core_pipeline::{
     deferred::{AlphaMask3dDeferred, Opaque3dDeferred},
 };
 use bevy_derive::{Deref, DerefMut};
-use bevy_ecs::entity::EntityHashMap;
+use bevy_ecs::entity::EntitySparseSet;
 use bevy_ecs::{
     prelude::*,
     query::ROQueryItem,
@@ -455,12 +455,12 @@ pub enum RenderMeshInstances {
 /// Information that the render world keeps about each entity that contains a
 /// mesh, when using CPU mesh instance data building.
 #[derive(Default, Deref, DerefMut)]
-pub struct RenderMeshInstancesCpu(EntityHashMap<RenderMeshInstanceCpu>);
+pub struct RenderMeshInstancesCpu(EntitySparseSet<RenderMeshInstanceCpu>);
 
 /// Information that the render world keeps about each entity that contains a
 /// mesh, when using GPU mesh instance data building.
 #[derive(Default, Deref, DerefMut)]
-pub struct RenderMeshInstancesGpu(EntityHashMap<RenderMeshInstanceGpu>);
+pub struct RenderMeshInstancesGpu(EntitySparseSet<RenderMeshInstanceGpu>);
 
 impl RenderMeshInstances {
     /// Creates a new [`RenderMeshInstances`] instance.
@@ -505,11 +505,11 @@ pub(crate) trait RenderMeshInstancesTable {
 
 impl RenderMeshInstancesTable for RenderMeshInstancesCpu {
     fn mesh_asset_id(&self, entity: Entity) -> Option<AssetId<Mesh>> {
-        self.get(&entity).map(|instance| instance.mesh_asset_id)
+        self.get(entity).map(|instance| instance.mesh_asset_id)
     }
 
     fn render_mesh_queue_data(&self, entity: Entity) -> Option<RenderMeshQueueData> {
-        self.get(&entity).map(|instance| RenderMeshQueueData {
+        self.get(entity).map(|instance| RenderMeshQueueData {
             shared: &instance.shared,
             translation: instance.transforms.transform.translation,
         })
@@ -519,13 +519,13 @@ impl RenderMeshInstancesTable for RenderMeshInstancesCpu {
 impl RenderMeshInstancesTable for RenderMeshInstancesGpu {
     /// Returns the ID of the mesh asset attached to the given entity, if any.
     fn mesh_asset_id(&self, entity: Entity) -> Option<AssetId<Mesh>> {
-        self.get(&entity).map(|instance| instance.mesh_asset_id)
+        self.get(entity).map(|instance| instance.mesh_asset_id)
     }
 
     /// Constructs [`RenderMeshQueueData`] for the given entity, if it has a
     /// mesh attached.
     fn render_mesh_queue_data(&self, entity: Entity) -> Option<RenderMeshQueueData> {
-        self.get(&entity).map(|instance| RenderMeshQueueData {
+        self.get(entity).map(|instance| RenderMeshQueueData {
             shared: &instance.shared,
             translation: instance.translation,
         })
@@ -555,7 +555,7 @@ pub struct ExtractMeshesSet;
 /// [`MeshUniform`] building.
 pub fn extract_meshes_for_cpu_building(
     mut render_mesh_instances: ResMut<RenderMeshInstances>,
-    mut render_mesh_instance_queues: Local<Parallel<Vec<(Entity, RenderMeshInstanceCpu)>>>,
+    mut render_mesh_instance_queues: Local<Parallel<(Vec<Entity>, Vec<RenderMeshInstanceCpu>)>>,
     meshes_query: Extract<
         Query<(
             Entity,
@@ -598,20 +598,16 @@ pub fn extract_meshes_for_cpu_building(
 
             render_mesh_instance_queues.scope(|queue| {
                 let transform = transform.affine();
-                queue.push((
-                    entity,
-                    RenderMeshInstanceCpu {
-                        transforms: MeshTransforms {
-                            transform: (&transform).into(),
-                            previous_transform: (&previous_transform
-                                .map(|t| t.0)
-                                .unwrap_or(transform))
-                                .into(),
-                            flags: mesh_flags.bits(),
-                        },
-                        shared,
+                queue.0.push(entity);
+                queue.1.push(RenderMeshInstanceCpu {
+                    transforms: MeshTransforms {
+                        transform: (&transform).into(),
+                        previous_transform: (&previous_transform.map(|t| t.0).unwrap_or(transform))
+                            .into(),
+                        flags: mesh_flags.bits(),
                     },
-                ));
+                    shared,
+                });
             });
         },
     );
@@ -627,9 +623,9 @@ pub fn extract_meshes_for_cpu_building(
 
     render_mesh_instances.clear();
     for queue in render_mesh_instance_queues.iter_mut() {
-        for (k, v) in queue.drain(..) {
-            render_mesh_instances.insert_unique_unchecked(k, v);
-        }
+        render_mesh_instances.insert_from_slice_unique(&queue.0, &queue.1);
+        queue.0.clear();
+        queue.1.clear();
     }
 }
 
@@ -644,8 +640,13 @@ pub fn extract_meshes_for_gpu_building(
         gpu_preprocessing::BatchedInstanceBuffers<MeshUniform, MeshInputUniform>,
     >,
     mut render_mesh_instance_queues: Local<
-        Parallel<Vec<((Entity, RenderMeshInstanceShared), MeshInputUniform)>>,
+        Parallel<(
+            Vec<Entity>,
+            Vec<RenderMeshInstanceGpu>,
+            Vec<MeshInputUniform>,
+        )>,
     >,
+
     meshes_query: Extract<
         Query<(
             Entity,
@@ -711,7 +712,7 @@ pub fn extract_meshes_for_gpu_building(
                 .contains(RenderMeshInstanceFlags::HAVE_PREVIOUS_TRANSFORM)
                 .then(|| {
                     render_mesh_instances
-                        .get(&entity)
+                        .get(entity)
                         .map(|render_mesh_instance| {
                             render_mesh_instance.current_uniform_index.into()
                         })
@@ -724,34 +725,36 @@ pub fn extract_meshes_for_gpu_building(
             let affine3: Affine3 = (&transform.affine()).into();
 
             render_mesh_instance_queues.scope(|queue| {
-                queue.push((
-                    (entity, shared),
-                    MeshInputUniform {
-                        flags: mesh_flags.bits(),
-                        lightmap_uv_rect,
-                        transform: affine3.to_transpose(),
-                        previous_input_index,
-                    },
-                ));
+                queue.0.push(entity);
+                queue.1.push(RenderMeshInstanceGpu {
+                    shared,
+                    translation: transform.translation(),
+                    current_uniform_index: NonMaxU32::ZERO,
+                });
+                queue.2.push(MeshInputUniform {
+                    flags: mesh_flags.bits(),
+                    lightmap_uv_rect,
+                    transform: affine3.to_transpose(),
+                    previous_input_index,
+                })
             });
         },
     );
 
     // Build the [`RenderMeshInstance`]s and [`MeshInputUniform`]s.
     render_mesh_instances.clear();
+    let buffer = current_input_buffer.values_mut();
     for queue in render_mesh_instance_queues.iter_mut() {
-        for ((e, s), u) in queue.drain(..) {
-            let buffer_index = current_input_buffer.push(u);
-            let translation = Vec3::new(u.transform[0].w, u.transform[1].w, u.transform[2].w);
-            render_mesh_instances.insert_unique_unchecked(
-                e,
-                RenderMeshInstanceGpu {
-                    shared: s,
-                    translation,
-                    current_uniform_index: NonMaxU32::new(buffer_index as u32).unwrap_or_default(),
-                },
-            );
-        }
+        let buffer_index = buffer.len();
+        buffer.extend(queue.2.drain(..));
+
+        assert!(buffer_index + queue.1.len() < u32::MAX as usize);
+        queue.1.iter_mut().enumerate().for_each(|(i, v)| {
+            v.current_uniform_index = NonMaxU32::new((i + buffer_index) as u32).unwrap_or_default()
+        });
+        render_mesh_instances.insert_from_slice_unique(&queue.0, &queue.1);
+        queue.0.clear();
+        queue.1.clear();
     }
 }
 
@@ -891,8 +894,8 @@ impl GetBatchData for MeshPipeline {
             );
             return None;
         };
-        let mesh_instance = mesh_instances.get(&entity)?;
-        let maybe_lightmap = lightmaps.render_lightmaps.get(&entity);
+        let mesh_instance = mesh_instances.get(entity)?;
+        let maybe_lightmap = lightmaps.render_lightmaps.get(entity);
 
         Some((
             MeshUniform::new(
@@ -924,8 +927,8 @@ impl GetFullBatchData for MeshPipeline {
             return None;
         };
 
-        let mesh_instance = mesh_instances.get(&entity)?;
-        let maybe_lightmap = lightmaps.render_lightmaps.get(&entity);
+        let mesh_instance = mesh_instances.get(entity)?;
+        let maybe_lightmap = lightmaps.render_lightmaps.get(entity);
 
         Some((
             mesh_instance.current_uniform_index,
@@ -947,8 +950,8 @@ impl GetFullBatchData for MeshPipeline {
             );
             return None;
         };
-        let mesh_instance = mesh_instances.get(&entity)?;
-        let maybe_lightmap = lightmaps.render_lightmaps.get(&entity);
+        let mesh_instance = mesh_instances.get(entity)?;
+        let maybe_lightmap = lightmaps.render_lightmaps.get(entity);
 
         Some(MeshUniform::new(
             &mesh_instance.transforms,
@@ -970,7 +973,7 @@ impl GetFullBatchData for MeshPipeline {
         };
 
         mesh_instances
-            .get(&entity)
+            .get(entity)
             .map(|entity| entity.current_uniform_index)
     }
 }
@@ -1638,13 +1641,13 @@ impl<P: PhaseItem, const I: usize> RenderCommand<P> for SetMeshBindGroup<I> {
         let skin_indices = skin_indices.into_inner();
         let morph_indices = morph_indices.into_inner();
 
-        let entity = &item.entity();
+        let entity = item.entity();
 
-        let Some(mesh_asset_id) = mesh_instances.mesh_asset_id(*entity) else {
+        let Some(mesh_asset_id) = mesh_instances.mesh_asset_id(entity) else {
             return RenderCommandResult::Success;
         };
-        let skin_index = skin_indices.get(entity);
-        let morph_index = morph_indices.get(entity);
+        let skin_index = skin_indices.get(&entity);
+        let morph_index = morph_indices.get(&entity);
 
         let is_skinned = skin_index.is_some();
         let is_morphed = morph_index.is_some();

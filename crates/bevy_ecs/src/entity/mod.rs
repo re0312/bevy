@@ -44,6 +44,8 @@ pub use map_entities::*;
 
 mod hash;
 pub use hash::*;
+mod entity_sparse_set;
+pub use entity_sparse_set::*;
 
 use bevy_utils::tracing::warn;
 

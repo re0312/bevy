@@ -1682,7 +1682,7 @@ pub fn queue_shadows<M: Material>(
                 // we need to include the appropriate flag in the mesh pipeline key
                 // to ensure that the necessary bind group layout entries are
                 // present.
-                if render_lightmaps.render_lightmaps.contains_key(&entity) {
+                if render_lightmaps.render_lightmaps.contains(entity) {
                     mesh_key |= MeshPipelineKey::LIGHTMAPPED;
                 }
 

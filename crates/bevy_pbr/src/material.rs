@@ -649,11 +649,11 @@ pub fn queue_material_meshes<M: Material>(
         }
 
         let rangefinder = view.rangefinder3d();
-        for visible_entity in visible_entities.iter::<WithMesh>() {
-            let Some(material_asset_id) = render_material_instances.get(visible_entity) else {
+        for visible_entity in visible_entities.iter::<WithMesh>().copied() {
+            let Some(material_asset_id) = render_material_instances.get(&visible_entity) else {
                 continue;
             };
-            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(*visible_entity)
+            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(visible_entity)
             else {
                 continue;
             };
@@ -705,7 +705,7 @@ pub fn queue_material_meshes<M: Material>(
                         let distance = rangefinder.distance_translation(&mesh_instance.translation)
                             + material.properties.depth_bias;
                         transmissive_phase.add(Transmissive3d {
-                            entity: *visible_entity,
+                            entity: visible_entity,
                             draw_function: draw_transmissive_pbr,
                             pipeline: pipeline_id,
                             distance,
@@ -720,7 +720,7 @@ pub fn queue_material_meshes<M: Material>(
                             material_bind_group_id: material.get_bind_group_id().0,
                             lightmap_image,
                         };
-                        opaque_phase.add(bin_key, *visible_entity, mesh_instance.should_batch());
+                        opaque_phase.add(bin_key, visible_entity, mesh_instance.should_batch());
                     }
                 }
                 // Alpha mask
@@ -729,7 +729,7 @@ pub fn queue_material_meshes<M: Material>(
                         let distance = rangefinder.distance_translation(&mesh_instance.translation)
                             + material.properties.depth_bias;
                         transmissive_phase.add(Transmissive3d {
-                            entity: *visible_entity,
+                            entity: visible_entity,
                             draw_function: draw_transmissive_pbr,
                             pipeline: pipeline_id,
                             distance,
@@ -743,18 +743,14 @@ pub fn queue_material_meshes<M: Material>(
                             asset_id: mesh_instance.mesh_asset_id,
                             material_bind_group_id: material.get_bind_group_id().0,
                         };
-                        alpha_mask_phase.add(
-                            bin_key,
-                            *visible_entity,
-                            mesh_instance.should_batch(),
-                        );
+                        alpha_mask_phase.add(bin_key, visible_entity, mesh_instance.should_batch());
                     }
                 }
                 _ => {
                     let distance = rangefinder.distance_translation(&mesh_instance.translation)
                         + material.properties.depth_bias;
                     transparent_phase.add(Transparent3d {
-                        entity: *visible_entity,
+                        entity: visible_entity,
                         draw_function: draw_transparent_pbr,
                         pipeline: pipeline_id,
                         distance,

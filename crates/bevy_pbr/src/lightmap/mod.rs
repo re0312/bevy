@@ -30,7 +30,7 @@
 
 use bevy_app::{App, Plugin};
 use bevy_asset::{load_internal_asset, AssetId, Handle};
-use bevy_ecs::entity::EntityHashMap;
+use bevy_ecs::entity::EntitySparseSet;
 use bevy_ecs::{
     component::Component,
     entity::Entity,
@@ -107,7 +107,7 @@ pub struct RenderLightmaps {
     ///
     /// Entities without lightmaps, or for which the mesh or lightmap isn't
     /// loaded, won't have entries in this table.
-    pub(crate) render_lightmaps: EntityHashMap<RenderLightmap>,
+    pub(crate) render_lightmaps: EntitySparseSet<RenderLightmap>,
 
     /// All active lightmap images in the scene.
     ///

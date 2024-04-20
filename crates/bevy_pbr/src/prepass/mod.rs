@@ -775,11 +775,11 @@ pub fn queue_prepass_material_meshes<M: Material>(
             view_key |= MeshPipelineKey::MOTION_VECTOR_PREPASS;
         }
 
-        for visible_entity in visible_entities.iter::<WithMesh>() {
-            let Some(material_asset_id) = render_material_instances.get(visible_entity) else {
+        for visible_entity in visible_entities.iter::<WithMesh>().copied() {
+            let Some(material_asset_id) = render_material_instances.get(&visible_entity) else {
                 continue;
             };
-            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(*visible_entity)
+            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(visible_entity)
             else {
                 continue;
             };
@@ -826,10 +826,7 @@ pub fn queue_prepass_material_meshes<M: Material>(
             // we need to include the appropriate flag in the mesh pipeline key
             // to ensure that the necessary bind group layout entries are
             // present.
-            if render_lightmaps
-                .render_lightmaps
-                .contains_key(visible_entity)
-            {
+            if render_lightmaps.render_lightmaps.contains(visible_entity) {
                 mesh_key |= MeshPipelineKey::LIGHTMAPPED;
             }
 
@@ -862,7 +859,7 @@ pub fn queue_prepass_material_meshes<M: Material>(
                                 asset_id: mesh_instance.mesh_asset_id,
                                 material_bind_group_id: material.get_bind_group_id().0,
                             },
-                            *visible_entity,
+                            visible_entity,
                             mesh_instance.should_batch(),
                         );
                     } else if let Some(opaque_phase) = opaque_phase.as_mut() {
@@ -873,7 +870,7 @@ pub fn queue_prepass_material_meshes<M: Material>(
                                 asset_id: mesh_instance.mesh_asset_id,
                                 material_bind_group_id: material.get_bind_group_id().0,
                             },
-                            *visible_entity,
+                            visible_entity,
                             mesh_instance.should_batch(),
                         );
                     }
@@ -889,7 +886,7 @@ pub fn queue_prepass_material_meshes<M: Material>(
                         };
                         alpha_mask_deferred_phase.as_mut().unwrap().add(
                             bin_key,
-                            *visible_entity,
+                            visible_entity,
                             mesh_instance.should_batch(),
                         );
                     } else if let Some(alpha_mask_phase) = alpha_mask_phase.as_mut() {
@@ -899,11 +896,7 @@ pub fn queue_prepass_material_meshes<M: Material>(
                             asset_id: mesh_instance.mesh_asset_id,
                             material_bind_group_id: material.get_bind_group_id().0,
                         };
-                        alpha_mask_phase.add(
-                            bin_key,
-                            *visible_entity,
-                            mesh_instance.should_batch(),
-                        );
+                        alpha_mask_phase.add(bin_key, visible_entity, mesh_instance.should_batch());
                     }
                 }
                 _ => {}
