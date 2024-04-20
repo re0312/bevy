@@ -746,7 +746,7 @@ pub fn extract_meshes_for_gpu_building(
     let buffer = current_input_buffer.values_mut();
     for queue in render_mesh_instance_queues.iter_mut() {
         let buffer_index = buffer.len();
-        buffer.extend(queue.2.drain(..));
+        buffer.append(&mut queue.2);
 
         assert!(buffer_index + queue.1.len() < u32::MAX as usize);
         queue.1.iter_mut().enumerate().for_each(|(i, v)| {
