@@ -736,7 +736,7 @@ pub fn extract_meshes_for_gpu_building(
                     lightmap_uv_rect,
                     transform: affine3.to_transpose(),
                     previous_input_index,
-                })
+                });
             });
         },
     );

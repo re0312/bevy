@@ -24,6 +24,7 @@ impl<V> EntitySparseSet<V> {
     pub fn get(&self, entity: Entity) -> Option<&V> {
         let dense_index = self.sparse.get(entity.index() as usize)?;
         if let Some(index) = *dense_index {
+            // SAFETY: if the sparse index points to something in the dense vec, it exists
             unsafe { Some(self.dense.get_unchecked(index.get() as usize)) }
         } else {
             None
@@ -38,20 +39,21 @@ impl<V> EntitySparseSet<V> {
             if let Some(dense_index) = sparse {
                 unsafe { *self.dense.get_unchecked_mut(dense_index.get() as usize) = value };
             } else {
-                let len = self.dense.len();
+                // SAFETY: the sparse index exists after resize.
                 unsafe {
                     *self.sparse.get_unchecked_mut(index) =
-                        Some(NonMaxU32::new_unchecked(len as u32))
+                        Some(NonMaxU32::new_unchecked(self.dense.len() as u32))
                 }
                 self.dense.push(value);
             }
         } else {
             self.sparse.resize(index + 1, None);
-            let len = self.dense.len();
-            self.dense.push(value);
+            // SAFETY: the sparse index exists after resize.
             unsafe {
-                *self.sparse.get_unchecked_mut(index) = Some(NonMaxU32::new_unchecked(len as u32))
+                *self.sparse.get_unchecked_mut(index) =
+                    Some(NonMaxU32::new_unchecked(self.dense.len() as u32))
             }
+            self.dense.push(value);
         }
     }
 
@@ -81,7 +83,7 @@ impl<V> EntitySparseSet<V> {
         let mut dst_len = self.dense.len();
         let count = entites.len();
         self.dense.reserve(count);
-        // SAFETY:
+        // SAFETY: have reserved enough space
         unsafe {
             std::ptr::copy_nonoverlapping(
                 values.as_ptr(),
@@ -92,10 +94,10 @@ impl<V> EntitySparseSet<V> {
         }
         entites.iter().copied().for_each(|e| {
             let index = e.index() as usize;
+            // SAFETY: the sparse index exists after resize.
             if index >= self.sparse.len() {
                 self.sparse.resize(index + 1, None)
             }
-            // SAFETY:
             unsafe {
                 *self.sparse.get_unchecked_mut(index) =
                     Some(NonMaxU32::new_unchecked(dst_len as u32))
