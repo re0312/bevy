@@ -6,7 +6,7 @@ use bevy_core_pipeline::{
     deferred::{AlphaMask3dDeferred, Opaque3dDeferred},
 };
 use bevy_derive::{Deref, DerefMut};
-use bevy_ecs::entity::EntitySparseSet;
+use bevy_ecs::entity::{EntityHashMap, EntitySparseSet};
 use bevy_ecs::{
     prelude::*,
     query::ROQueryItem,
@@ -403,6 +403,32 @@ pub struct RenderMeshInstanceShared {
     pub flags: RenderMeshInstanceFlags,
 }
 
+/// Information that is gathered during the parallel portion of mesh extraction
+/// when GPU mesh uniform building is enabled.
+///
+/// From this, the [`MeshInputUniform`] and [`RenderMeshInstanceGpu`] are
+/// prepared.
+pub struct RenderMeshInstanceGpuBuilder {
+    /// Data that will be placed on the [`RenderMeshInstanceGpu`].
+    pub shared: RenderMeshInstanceShared,
+    /// The current transform.
+    pub transform: Affine3,
+    /// Four 16-bit unsigned normalized UV values packed into a [`UVec2`]:
+    ///
+    /// ```text
+    ///                         <--- MSB                   LSB --->
+    ///                         +---- min v ----+ +---- min u ----+
+    ///     lightmap_uv_rect.x: vvvvvvvv vvvvvvvv uuuuuuuu uuuuuuuu,
+    ///                         +---- max v ----+ +---- max u ----+
+    ///     lightmap_uv_rect.y: VVVVVVVV VVVVVVVV UUUUUUUU UUUUUUUU,
+    ///
+    /// (MSB: most significant bit; LSB: least significant bit.)
+    /// ```
+    pub lightmap_uv_rect: UVec2,
+    /// Various flags.
+    pub mesh_flags: MeshFlags,
+}
+
 impl RenderMeshInstanceShared {
     fn from_components(
         previous_transform: Option<&PreviousGlobalTransform>,
@@ -460,7 +486,7 @@ pub struct RenderMeshInstancesCpu(EntitySparseSet<RenderMeshInstanceCpu>);
 /// Information that the render world keeps about each entity that contains a
 /// mesh, when using GPU mesh instance data building.
 #[derive(Default, Deref, DerefMut)]
-pub struct RenderMeshInstancesGpu(EntitySparseSet<RenderMeshInstanceGpu>);
+pub struct RenderMeshInstancesGpu(EntityHashMap<RenderMeshInstanceGpu>);
 
 impl RenderMeshInstances {
     /// Creates a new [`RenderMeshInstances`] instance.
@@ -519,13 +545,13 @@ impl RenderMeshInstancesTable for RenderMeshInstancesCpu {
 impl RenderMeshInstancesTable for RenderMeshInstancesGpu {
     /// Returns the ID of the mesh asset attached to the given entity, if any.
     fn mesh_asset_id(&self, entity: Entity) -> Option<AssetId<Mesh>> {
-        self.get(entity).map(|instance| instance.mesh_asset_id)
+        self.get(&entity).map(|instance| instance.mesh_asset_id)
     }
 
     /// Constructs [`RenderMeshQueueData`] for the given entity, if it has a
     /// mesh attached.
     fn render_mesh_queue_data(&self, entity: Entity) -> Option<RenderMeshQueueData> {
-        self.get(entity).map(|instance| RenderMeshQueueData {
+        self.get(&entity).map(|instance| RenderMeshQueueData {
             shared: &instance.shared,
             translation: instance.translation,
         })
@@ -639,14 +665,8 @@ pub fn extract_meshes_for_gpu_building(
     mut batched_instance_buffers: ResMut<
         gpu_preprocessing::BatchedInstanceBuffers<MeshUniform, MeshInputUniform>,
     >,
-    mut render_mesh_instance_queues: Local<
-        Parallel<(
-            Vec<Entity>,
-            Vec<RenderMeshInstanceGpu>,
-            Vec<MeshInputUniform>,
-        )>,
-    >,
-
+    mut render_mesh_instance_queues: Local<Parallel<Vec<(Entity, RenderMeshInstanceGpuBuilder)>>>,
+    mut prev_render_mesh_instances: Local<RenderMeshInstancesGpu>,
     meshes_query: Extract<
         Query<(
             Entity,
@@ -662,24 +682,6 @@ pub fn extract_meshes_for_gpu_building(
         )>,
     >,
 ) {
-    // Collect render mesh instances. Build up the uniform buffer.
-    let RenderMeshInstances::GpuBuilding(ref mut render_mesh_instances) = *render_mesh_instances
-    else {
-        panic!(
-            "`collect_render_mesh_instances_for_gpu_building` should only be called if we're \
-                using GPU `MeshUniform` building"
-        );
-    };
-
-    let gpu_preprocessing::BatchedInstanceBuffers {
-        ref mut current_input_buffer,
-        ref mut previous_input_buffer,
-        ..
-    } = *batched_instance_buffers;
-
-    // Swap buffers.
-    mem::swap(current_input_buffer, previous_input_buffer);
-
     meshes_query.par_iter().for_each(
         |(
             entity,
@@ -707,57 +709,101 @@ pub fn extract_meshes_for_gpu_building(
                 no_automatic_batching,
             );
 
-            let previous_input_index = shared
-                .flags
-                .contains(RenderMeshInstanceFlags::HAVE_PREVIOUS_TRANSFORM)
-                .then(|| {
-                    render_mesh_instances
-                        .get(entity)
-                        .map(|render_mesh_instance| {
-                            render_mesh_instance.current_uniform_index.into()
-                        })
-                        .unwrap_or(u32::MAX)
-                })
-                .unwrap_or(u32::MAX);
-
             let lightmap_uv_rect =
                 lightmap::pack_lightmap_uv_rect(lightmap.map(|lightmap| lightmap.uv_rect));
-            let affine3: Affine3 = (&transform.affine()).into();
 
             render_mesh_instance_queues.scope(|queue| {
-                queue.0.push(entity);
-                queue.1.push(RenderMeshInstanceGpu {
-                    shared,
-                    translation: transform.translation(),
-                    current_uniform_index: NonMaxU32::ZERO,
-                });
-                queue.2.push(MeshInputUniform {
-                    flags: mesh_flags.bits(),
-                    lightmap_uv_rect,
-                    transform: affine3.to_transpose(),
-                    previous_input_index,
-                });
+                queue.push((
+                    entity,
+                    RenderMeshInstanceGpuBuilder {
+                        shared,
+                        transform: (&transform.affine()).into(),
+                        lightmap_uv_rect,
+                        mesh_flags,
+                    },
+                ));
             });
         },
     );
 
-    // Build the [`RenderMeshInstance`]s and [`MeshInputUniform`]s.
-    render_mesh_instances.clear();
-    let buffer = current_input_buffer.values_mut();
-    for queue in render_mesh_instance_queues.iter_mut() {
-        let buffer_index = buffer.len();
-        buffer.append(&mut queue.2);
-
-        assert!(buffer_index + queue.1.len() < u32::MAX as usize);
-        queue.1.iter_mut().enumerate().for_each(|(i, v)| {
-            v.current_uniform_index = NonMaxU32::new((i + buffer_index) as u32).unwrap_or_default()
-        });
-        render_mesh_instances.insert_from_slice_unique(&queue.0, &queue.1);
-        queue.0.clear();
-        queue.1.clear();
-    }
+    collect_meshes_for_gpu_building(
+        &mut render_mesh_instances,
+        &mut batched_instance_buffers,
+        &mut render_mesh_instance_queues,
+        &mut prev_render_mesh_instances,
+    );
 }
 
+/// Creates the [`RenderMeshInstanceGpu`]s and [`MeshInputUniform`]s when GPU
+/// mesh uniforms are built.
+fn collect_meshes_for_gpu_building(
+    render_mesh_instances: &mut RenderMeshInstances,
+    batched_instance_buffers: &mut gpu_preprocessing::BatchedInstanceBuffers<
+        MeshUniform,
+        MeshInputUniform,
+    >,
+    render_mesh_instance_queues: &mut Parallel<Vec<(Entity, RenderMeshInstanceGpuBuilder)>>,
+    prev_render_mesh_instances: &mut RenderMeshInstancesGpu,
+) {
+    // Collect render mesh instances. Build up the uniform buffer.
+    let RenderMeshInstances::GpuBuilding(ref mut render_mesh_instances) = *render_mesh_instances
+    else {
+        panic!(
+            "`collect_render_mesh_instances_for_gpu_building` should only be called if we're \
+            using GPU `MeshUniform` building"
+        );
+    };
+
+    let gpu_preprocessing::BatchedInstanceBuffers {
+        ref mut current_input_buffer,
+        ref mut previous_input_buffer,
+        ..
+    } = batched_instance_buffers;
+
+    // Swap buffers.
+    mem::swap(current_input_buffer, previous_input_buffer);
+    mem::swap(render_mesh_instances, prev_render_mesh_instances);
+
+    // Build the [`RenderMeshInstance`]s and [`MeshInputUniform`]s.
+    render_mesh_instances.clear();
+    for queue in render_mesh_instance_queues.iter_mut() {
+        for (entity, builder) in queue.drain(..) {
+            let previous_input_index = if builder
+                .shared
+                .flags
+                .contains(RenderMeshInstanceFlags::HAVE_PREVIOUS_TRANSFORM)
+            {
+                prev_render_mesh_instances
+                    .get(&entity)
+                    .map(|render_mesh_instance| render_mesh_instance.current_uniform_index)
+            } else {
+                None
+            };
+
+            // Push the mesh input uniform.
+            let current_uniform_index = current_input_buffer.push(MeshInputUniform {
+                transform: builder.transform.to_transpose(),
+                lightmap_uv_rect: builder.lightmap_uv_rect,
+                flags: builder.mesh_flags.bits(),
+                previous_input_index: match previous_input_index {
+                    Some(previous_input_index) => previous_input_index.into(),
+                    None => u32::MAX,
+                },
+            }) as u32;
+
+            // Record the [`RenderMeshInstance`].
+            render_mesh_instances.insert(
+                entity,
+                RenderMeshInstanceGpu {
+                    translation: builder.transform.translation,
+                    shared: builder.shared,
+                    current_uniform_index: NonMaxU32::try_from(current_uniform_index)
+                        .unwrap_or_default(),
+                },
+            );
+        }
+    }
+}
 #[derive(Resource, Clone)]
 pub struct MeshPipeline {
     view_layouts: [MeshPipelineViewLayout; MeshPipelineViewLayoutKey::COUNT],
@@ -927,7 +973,7 @@ impl GetFullBatchData for MeshPipeline {
             return None;
         };
 
-        let mesh_instance = mesh_instances.get(entity)?;
+        let mesh_instance = mesh_instances.get(&entity)?;
         let maybe_lightmap = lightmaps.render_lightmaps.get(entity);
 
         Some((
@@ -973,7 +1019,7 @@ impl GetFullBatchData for MeshPipeline {
         };
 
         mesh_instances
-            .get(entity)
+            .get(&entity)
             .map(|entity| entity.current_uniform_index)
     }
 }

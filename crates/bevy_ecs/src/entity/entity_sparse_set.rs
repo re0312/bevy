@@ -37,9 +37,10 @@ impl<V> EntitySparseSet<V> {
         let index = entity.index() as usize;
         if let Some(&sparse) = self.sparse.get(index) {
             if let Some(dense_index) = sparse {
+                // SAFETY: if the sparse index points to something in the dense vec, it exists
                 unsafe { *self.dense.get_unchecked_mut(dense_index.get() as usize) = value };
             } else {
-                // SAFETY: the sparse index exists after resize.
+                // SAFETY: if the sparse index points to something in the dense vec, it exists
                 unsafe {
                     *self.sparse.get_unchecked_mut(index) =
                         Some(NonMaxU32::new_unchecked(self.dense.len() as u32))
@@ -67,6 +68,7 @@ impl<V> EntitySparseSet<V> {
             false
         }
     }
+
     /// Removes all of the values stored within.
     pub fn clear(&mut self) {
         self.sparse.clear();
@@ -83,7 +85,8 @@ impl<V> EntitySparseSet<V> {
         let mut dst_len = self.dense.len();
         let count = entites.len();
         self.dense.reserve(count);
-        // SAFETY: have reserved enough space
+        // SAFETY: dense has reserved enough capacity.
+        // The slices cannot overlap because mutable references are exclusive.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 values.as_ptr(),
