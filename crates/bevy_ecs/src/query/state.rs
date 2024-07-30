@@ -160,17 +160,63 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         access: &mut Access<ArchetypeComponentId>,
     ) -> Self {
         let mut state = Self::new_uninitialized(world);
-        for archetype in world.archetypes.iter() {
-            // SAFETY: The state was just initialized from the `world` above, and the archetypes being added
-            // come directly from the same world.
-            unsafe {
-                if state.new_archetype_internal(archetype) {
-                    state.update_archetype_component_access(archetype, access);
+        // state.update_archetypes_unsafe_world_cell(world.as_unsafe_world_cell_readonly());
+        if let Some(ids) = state.matched_archetype_ids_in_world(world) {
+            for &id in ids {
+                // exclude archetypes that have already been processed
+                if id < state.archetype_generation.0 {
+                    continue;
+                }
+                // SAFETY: get_potential_archetypes only returns archetype ids that are valid for the world
+                let archetype = &world.archetypes()[id];
+                unsafe {
+                    if state.new_archetype_internal(archetype) {
+                        state.update_archetype_component_access(archetype, access);
+                    }
+                };
+            }
+        };
+        state.archetype_generation = world.archetypes().generation();
+        state
+    }
+
+    fn update_archetypes_with_component_index(&mut self, world: &World) {
+        if let Some(archetypes) = self.matched_archetype_ids_in_world(world) {
+            for &archetype_id in archetypes {
+                // exclude archetypes that have already been processed
+                if archetype_id < self.archetype_generation.0 {
+                    continue;
+                }
+                // SAFETY: get_potential_archetypes only returns archetype ids that are valid for the world
+                let archetype = &world.archetypes()[archetype_id];
+                unsafe {
+                    self.new_archetype_internal(archetype);
                 }
             }
         }
-        state.archetype_generation = world.archetypes.generation();
-        state
+        self.archetype_generation = world.archetypes().generation();
+    }
+
+    #[inline]
+    fn matched_archetype_ids_in_world<'w>(
+        &mut self,
+        world: &'w World,
+    ) -> Option<impl Iterator<Item = &'w ArchetypeId>> {
+        // if there are required components, we can optimize by only iterating through archetypes
+        // that contain at least one of the required components
+        self.component_access
+            .required
+            .ones()
+            .filter_map(|idx| {
+                let component_id = ComponentId::get_sparse_set_index(idx);
+                world
+                    .archetypes()
+                    .component_index()
+                    .get(&component_id)
+                    .map(|index| index.keys())
+            })
+            // select the component with the fewest archetypes
+            .min_by_key(std::iter::ExactSizeIterator::len)
     }
 
     /// Creates a new [`QueryState`] but does not populate it with the matched results from the World yet
@@ -339,55 +385,8 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
                 }
             }
         } else {
-            self.update_archetypes_unsafe_world_cell(world.as_unsafe_world_cell_readonly());
+            self.update_archetypes_with_component_index(world)
         }
-    }
-
-    /// Updates the state's internal view of the `world`'s archetypes. If this is not called before querying data,
-    /// the results may not accurately reflect what is in the `world`.
-    ///
-    /// This is only required if a `manual` method (such as [`Self::get_manual`]) is being called, and it only needs to
-    /// be called if the `world` has been structurally mutated (i.e. added/removed a component or resource). Users using
-    /// non-`manual` methods such as [`QueryState::get`] do not need to call this as it will be automatically called for them.
-    ///
-    /// # Note
-    ///
-    /// This method only accesses world metadata.
-    ///
-    /// # Panics
-    ///
-    /// If `world` does not match the one used to call `QueryState::new` for this instance.
-    pub fn update_archetypes_unsafe_world_cell(&mut self, world: UnsafeWorldCell) {
-        // if there are required components, we can optimize by only iterating through archetypes
-        // that contain at least one of the required components
-        let potential_archetypes = self
-            .component_access
-            .required
-            .ones()
-            .filter_map(|idx| {
-                let component_id = ComponentId::get_sparse_set_index(idx);
-                world
-                    .archetypes()
-                    .component_index()
-                    .get(&component_id)
-                    .map(|index| index.keys())
-            })
-            // select the component with the fewest archetypes
-            .min_by_key(std::iter::ExactSizeIterator::len);
-        if let Some(archetypes) = potential_archetypes {
-            for archetype_id in archetypes {
-                // exclude archetypes that have already been processed
-                if archetype_id < &self.archetype_generation.0 {
-                    continue;
-                }
-                // SAFETY: get_potential_archetypes only returns archetype ids that are valid for the world
-                let archetype = &world.archetypes()[*archetype_id];
-                unsafe {
-                    self.new_archetype_internal(archetype);
-                }
-            }
-        }
-        self.archetype_generation = world.archetypes().generation();
     }
 
     /// # Panics
@@ -876,7 +875,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         world: UnsafeWorldCell<'w>,
         entity: Entity,
     ) -> Result<D::Item<'w>, QueryEntityError> {
-        self.update_archetypes_unsafe_world_cell(world);
+        self.update_archetypes(world.world());
         self.get_unchecked_manual(world, entity, world.last_change_tick(), world.change_tick())
     }
 
@@ -1232,7 +1231,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         &'s mut self,
         world: UnsafeWorldCell<'w>,
     ) -> QueryIter<'w, 's, D, F> {
-        self.update_archetypes_unsafe_world_cell(world);
+        self.update_archetypes(world.world());
         self.iter_unchecked_manual(world, world.last_change_tick(), world.change_tick())
     }
 
@@ -1252,7 +1251,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         &'s mut self,
         world: UnsafeWorldCell<'w>,
     ) -> QueryCombinationIter<'w, 's, D, F, K> {
-        self.update_archetypes_unsafe_world_cell(world);
+        self.update_archetypes(world.world());
         self.iter_combinations_unchecked_manual(
             world,
             world.last_change_tick(),
@@ -1649,7 +1648,7 @@ impl<D: QueryData, F: QueryFilter> QueryState<D, F> {
         &mut self,
         world: UnsafeWorldCell<'w>,
     ) -> Result<D::Item<'w>, QuerySingleError> {
-        self.update_archetypes_unsafe_world_cell(world);
+        self.update_archetypes(world.world());
         self.get_single_unchecked_manual(world, world.last_change_tick(), world.change_tick())
     }
 
