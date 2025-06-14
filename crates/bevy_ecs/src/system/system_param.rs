@@ -6,8 +6,8 @@ use crate::{
     component::{ComponentId, ComponentTicks, Components, Tick},
     entity::Entities,
     query::{
-        Access, FilteredAccess, FilteredAccessSet, QueryData, QueryFilter, QuerySingleError,
-        QueryState, ReadOnlyQueryData,
+        Access, CachedQueryState, DebugCheckedUnwrap, FilteredAccess, FilteredAccessSet, QueryData,
+        QueryFilter, QuerySingleError, QueryState, ReadOnlyQueryData,
     },
     resource::Resource,
     storage::ResourceData,
@@ -33,6 +33,8 @@ use core::{
     panic::Location,
 };
 use disqualified::ShortName;
+use log::warn;
+use std::println;
 use thiserror::Error;
 
 use super::Populated;
@@ -301,6 +303,12 @@ pub unsafe trait SystemParam: Sized {
         world: UnsafeWorldCell<'world>,
         change_tick: Tick,
     ) -> Self::Item<'world, 'state>;
+
+    fn cached(_state: &mut Self::State, _world: &mut World) -> bool {
+        false
+    }
+
+    fn cleanup(_state: &mut Self::State, _world: &mut World) {}
 }
 
 /// A [`SystemParam`] that only reads a given [`World`].
@@ -312,6 +320,39 @@ pub unsafe trait ReadOnlySystemParam: SystemParam {}
 /// Shorthand way of accessing the associated type [`SystemParam::Item`] for a given [`SystemParam`].
 pub type SystemParamItem<'w, 's, P> = <P as SystemParam>::Item<'w, 's>;
 
+pub enum QueryParamState<D: QueryData, F: QueryFilter = ()> {
+    Raw(Option<QueryState<D, F>>),
+    Cached(CachedQueryState<D, F>),
+    Invalid,
+}
+
+impl<D: QueryData + 'static, F: QueryFilter + 'static> QueryParamState<D, F> {
+    pub(crate) fn cached(&mut self, world: &mut World) -> bool {
+        match self {
+            Self::Raw(s) => {
+                let state = core::mem::take(s).unwrap();
+                let entity = world.spawn_empty().id();
+                let cached = CachedQueryState {
+                    entity,
+                    _marker: PhantomData::default(),
+                };
+                CachedQueryState::initialize_with_entity(entity, state, world);
+                *self = QueryParamState::Cached(cached);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+impl<D: QueryData, F: QueryFilter> Drop for QueryParamState<D, F> {
+    fn drop(&mut self) {
+        if let Self::Cached(cached) = self {
+            let e = cached.id();
+            warn!("Memory leak risk! CachedQueryState entity '{e}' maintains world-related cache that must be explicitly cleaned before drop. Please call System::cleanup manually" );
+        }
+    }
+}
 // SAFETY: QueryState is constrained to read-only fetches, so it only reads World.
 unsafe impl<'w, 's, D: ReadOnlyQueryData + 'static, F: QueryFilter + 'static> ReadOnlySystemParam
     for Query<'w, 's, D, F>
@@ -321,13 +362,13 @@ unsafe impl<'w, 's, D: ReadOnlyQueryData + 'static, F: QueryFilter + 'static> Re
 // SAFETY: Relevant query ComponentId access is applied to SystemMeta. If
 // this Query conflicts with any prior access, a panic will occur.
 unsafe impl<D: QueryData + 'static, F: QueryFilter + 'static> SystemParam for Query<'_, '_, D, F> {
-    type State = QueryState<D, F>;
+    type State = QueryParamState<D, F>;
     type Item<'w, 's> = Query<'w, 's, D, F>;
 
     fn init_state(world: &mut World, system_meta: &mut SystemMeta) -> Self::State {
         let state = QueryState::new(world);
         init_query_param(world, system_meta, &state);
-        state
+        QueryParamState::Raw(Some(state))
     }
 
     #[inline]
@@ -337,11 +378,44 @@ unsafe impl<D: QueryData + 'static, F: QueryFilter + 'static> SystemParam for Qu
         world: UnsafeWorldCell<'w>,
         change_tick: Tick,
     ) -> Self::Item<'w, 's> {
+        let state: &'s mut QueryState<D, F> = match state {
+            QueryParamState::Raw(state) => state.as_mut().debug_checked_unwrap(),
+            QueryParamState::Cached(cached) => {
+                // SAFETY: CachedQueryState must be valid.
+                let state = unsafe {
+                    cached
+                        .clone()
+                        .fetch_mut_from_world(world)
+                        .debug_checked_unwrap()
+                };
+                // SAFETY: The transmute is only used for changing the lifetime,
+                // The `state` maintains the same lifetime as `world` throughout query system's execution.
+                unsafe { core::mem::transmute(state) }
+            }
+            QueryParamState::Invalid => {
+                panic!("tring to using an invalid QueryState")
+            }
+        };
         // SAFETY: We have registered all of the query's world accesses,
         // so the caller ensures that `world` has permission to access any
         // world data that the query needs.
         // The caller ensures the world matches the one used in init_state.
         unsafe { state.query_unchecked_with_ticks(world, system_meta.last_run, change_tick) }
+    }
+
+    fn cached(state: &mut Self::State, world: &mut World) -> bool {
+        state.cached(world)
+    }
+
+    fn cleanup(state: &mut Self::State, world: &mut World) {
+        match state {
+            QueryParamState::Cached(cached) => {
+                world.despawn(cached.id());
+                let old = core::mem::replace(state, QueryParamState::Invalid);
+                core::mem::forget(old);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -386,7 +460,7 @@ fn assert_component_access_compatibility(
 // SAFETY: Relevant query ComponentId access is applied to SystemMeta. If
 // this Query conflicts with any prior access, a panic will occur.
 unsafe impl<'a, D: QueryData + 'static, F: QueryFilter + 'static> SystemParam for Single<'a, D, F> {
-    type State = QueryState<D, F>;
+    type State = QueryParamState<D, F>;
     type Item<'w, 's> = Single<'w, D, F>;
 
     fn init_state(world: &mut World, system_meta: &mut SystemMeta) -> Self::State {
@@ -400,10 +474,8 @@ unsafe impl<'a, D: QueryData + 'static, F: QueryFilter + 'static> SystemParam fo
         world: UnsafeWorldCell<'w>,
         change_tick: Tick,
     ) -> Self::Item<'w, 's> {
-        // SAFETY: State ensures that the components it accesses are not accessible somewhere elsewhere.
-        // The caller ensures the world matches the one used in init_state.
-        let query =
-            unsafe { state.query_unchecked_with_ticks(world, system_meta.last_run, change_tick) };
+        // SAFETY: Delegate to existing `SystemParam` implementations.
+        let query = unsafe { Query::get_param(state, system_meta, world, change_tick) };
         let single = query
             .single_inner()
             .expect("The query was expected to contain exactly one matching entity.");
@@ -419,12 +491,8 @@ unsafe impl<'a, D: QueryData + 'static, F: QueryFilter + 'static> SystemParam fo
         system_meta: &SystemMeta,
         world: UnsafeWorldCell,
     ) -> Result<(), SystemParamValidationError> {
-        // SAFETY: State ensures that the components it accesses are not mutably accessible elsewhere
-        // and the query is read only.
-        // The caller ensures the world matches the one used in init_state.
-        let query = unsafe {
-            state.query_unchecked_with_ticks(world, system_meta.last_run, world.change_tick())
-        };
+        // SAFETY: Delegate to existing `SystemParam` implementations.
+        let query = unsafe { Query::get_param(state, system_meta, world, world.change_tick()) };
         match query.single_inner() {
             Ok(_) => Ok(()),
             Err(QuerySingleError::NoEntities(_)) => Err(
@@ -434,6 +502,10 @@ unsafe impl<'a, D: QueryData + 'static, F: QueryFilter + 'static> SystemParam fo
                 SystemParamValidationError::skipped::<Self>("Multiple matching entities"),
             ),
         }
+    }
+
+    fn cached(state: &mut Self::State, world: &mut World) -> bool {
+        state.cached(world)
     }
 }
 
@@ -448,7 +520,7 @@ unsafe impl<'a, D: ReadOnlyQueryData + 'static, F: QueryFilter + 'static> ReadOn
 unsafe impl<D: QueryData + 'static, F: QueryFilter + 'static> SystemParam
     for Populated<'_, '_, D, F>
 {
-    type State = QueryState<D, F>;
+    type State = QueryParamState<D, F>;
     type Item<'w, 's> = Populated<'w, 's, D, F>;
 
     fn init_state(world: &mut World, system_meta: &mut SystemMeta) -> Self::State {
@@ -473,12 +545,8 @@ unsafe impl<D: QueryData + 'static, F: QueryFilter + 'static> SystemParam
         system_meta: &SystemMeta,
         world: UnsafeWorldCell,
     ) -> Result<(), SystemParamValidationError> {
-        // SAFETY:
-        // - We have read-only access to the components accessed by query.
-        // - The caller ensures the world matches the one used in init_state.
-        let query = unsafe {
-            state.query_unchecked_with_ticks(world, system_meta.last_run, world.change_tick())
-        };
+        // SAFETY: Delegate to existing `SystemParam` implementations.
+        let query = unsafe { Query::get_param(state, system_meta, world, world.change_tick()) };
         if query.is_empty() {
             Err(SystemParamValidationError::skipped::<Self>(
                 "No matching entities",
@@ -486,6 +554,11 @@ unsafe impl<D: QueryData + 'static, F: QueryFilter + 'static> SystemParam
         } else {
             Ok(())
         }
+    }
+
+    fn cached(state: &mut Self::State, world: &mut World) -> bool {
+        state.cached(world);
+        true
     }
 }
 
@@ -688,6 +761,20 @@ macro_rules! impl_param_set {
                     world,
                     change_tick,
                 }
+            }
+
+            fn cached(
+                state: &mut Self::State,
+                world: &mut World,
+            ) -> bool {
+                <($($param,)*) as SystemParam>::cached(state , world)
+            }
+
+            fn cleanup(
+                state: &mut Self::State,
+                world: &mut World,
+            ) {
+                <($($param,)*) as SystemParam>::cleanup(state , world)
             }
         }
 
@@ -1984,6 +2071,22 @@ macro_rules! impl_system_param_tuple {
                     reason = "Zero-length tuples won't have any params to get."
                 )]
                 ($($param::get_param($param, system_meta, world, change_tick),)*)
+            }
+
+            fn cached(
+                state: &mut Self::State,
+                world: &mut World,
+            ) -> bool {
+                let ($($param,)*) = state;
+                $($param::cached($param , world)|)* false
+            }
+
+            fn cleanup(
+                state: &mut Self::State,
+                world: &mut World,
+            ) {
+                let ($($param,)*) = state;
+                $($param::cleanup($param , world);)*
             }
         }
     };

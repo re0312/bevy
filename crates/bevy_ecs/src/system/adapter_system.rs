@@ -194,6 +194,14 @@ where
     fn set_last_run(&mut self, last_run: crate::component::Tick) {
         self.system.set_last_run(last_run);
     }
+
+    fn cached(&mut self, world: &mut crate::prelude::World) {
+        self.system.cached(world);
+    }
+
+    fn cleanup(&mut self, world: &mut crate::prelude::World) {
+        self.system.cleanup(world);
+    }
 }
 
 // SAFETY: The inner system is read-only.

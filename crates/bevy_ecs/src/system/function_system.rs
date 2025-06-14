@@ -742,6 +742,17 @@ where
     fn set_last_run(&mut self, last_run: Tick) {
         self.system_meta.last_run = last_run;
     }
+
+    fn cached(&mut self, world: &mut World) {
+        let state = self.state.as_mut().expect(Self::ERROR_UNINITIALIZED);
+        F::Param::cached(&mut state.param, world);
+    }
+
+    fn cleanup(&mut self, world: &mut World) {
+        if let Some(state) = self.state.as_mut() {
+            F::Param::cleanup(&mut state.param, world);
+        };
+    }
 }
 
 /// SAFETY: `F`'s param is [`ReadOnlySystemParam`], so this system will only read from the world.

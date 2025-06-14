@@ -227,6 +227,16 @@ where
         self.a.set_last_run(last_run);
         self.b.set_last_run(last_run);
     }
+
+    fn cached(&mut self, world: &mut World) {
+        self.a.cached(world);
+        self.b.cached(world);
+    }
+
+    fn cleanup(&mut self, world: &mut World) {
+        self.a.cleanup(world);
+        self.b.cleanup(world);
+    }
 }
 
 /// SAFETY: Both systems are read-only, so any system created by combining them will only read from the world.
@@ -444,6 +454,16 @@ where
     fn set_last_run(&mut self, last_run: Tick) {
         self.a.set_last_run(last_run);
         self.b.set_last_run(last_run);
+    }
+
+    fn cached(&mut self, world: &mut World) {
+        self.a.cached(world);
+        self.b.cached(world);
+    }
+
+    fn cleanup(&mut self, world: &mut World) {
+        self.a.cleanup(world);
+        self.b.cleanup(world);
     }
 }
 

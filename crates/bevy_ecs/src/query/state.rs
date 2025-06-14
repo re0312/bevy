@@ -3,7 +3,7 @@ use crate::{
     component::{ComponentId, Tick},
     entity::{Entity, EntityEquivalent, EntitySet, UniqueEntityArray},
     entity_disabling::DefaultQueryFilters,
-    prelude::FromWorld,
+    prelude::{Component, FromWorld},
     query::{FilteredAccess, QueryCombinationIter, QueryIter, QueryParIter, WorldQuery},
     storage::{SparseSetIndex, TableId},
     system::Query,
@@ -14,7 +14,8 @@ use crate::{
 use crate::entity::UniqueEntityEquivalentSlice;
 
 use alloc::vec::Vec;
-use core::{fmt, ptr};
+use core::{any::TypeId, fmt, marker::PhantomData, ptr};
+use derive_more::derive::{Deref, DerefMut};
 use fixedbitset::FixedBitSet;
 use log::warn;
 #[cfg(feature = "trace")]
@@ -25,6 +26,67 @@ use super::{
     QueryManyUniqueIter, QuerySingleError, ROQueryItem, ReadOnlyQueryData,
 };
 
+#[derive(Copy)]
+pub struct CachedQueryState<D: QueryData, F: QueryFilter = ()> {
+    pub(crate) entity: Entity,
+    pub(crate) _marker: PhantomData<(D, F)>,
+}
+
+impl<D: QueryData + 'static, F: QueryFilter + 'static> CachedQueryState<D, F> {
+    #[inline]
+    pub(crate) unsafe fn fetch_mut_from_world<'w>(
+        self,
+        world: UnsafeWorldCell<'w>,
+    ) -> Option<&'w mut QueryState<D, F>> {
+        let id = world
+            .components()
+            .get_valid_id(TypeId::of::<InternalQueryState<D, F>>())?;
+        world
+            .storages()
+            .sparse_sets
+            .get(id)?
+            .get(self.id())
+            .map(|ptr| ptr.assert_unique().deref_mut())
+    }
+
+    pub(crate) fn initialize_with_entity(
+        entity: Entity,
+        state: QueryState<D, F>,
+        world: &mut World,
+    ) -> Self {
+        world.entity_mut(entity).insert(InternalQueryState(state));
+        Self {
+            entity,
+            _marker: PhantomData::default(),
+        }
+    }
+}
+
+impl<D: QueryData, F: QueryFilter> Clone for CachedQueryState<D, F> {
+    fn clone(&self) -> Self {
+        Self {
+            entity: self.entity,
+            _marker: PhantomData::default(),
+        }
+    }
+}
+
+impl<D: QueryData, F: QueryFilter> CachedQueryState<D, F> {
+    #[inline]
+    pub fn id(&self) -> Entity {
+        self.entity
+    }
+}
+// SAFETY: All members are Send
+unsafe impl<D: QueryData, F: QueryFilter> Send for CachedQueryState<D, F> {}
+// SAFETY: All members are Send
+unsafe impl<D: QueryData, F: QueryFilter> Sync for CachedQueryState<D, F> {}
+
+#[repr(C)]
+#[derive(Component, Deref, DerefMut)]
+#[component(storage = "SparseSet", immutable)]
+/// A Internal Wrapper of [`QueryState`] for safety reasons.
+pub(crate) struct InternalQueryState<D: QueryData, F: QueryFilter>(QueryState<D, F>);
 /// An ID for either a table or an archetype. Used for Query iteration.
 ///
 /// Query iteration is exclusively dense (over tables) or archetypal (over archetypes) based on whether
