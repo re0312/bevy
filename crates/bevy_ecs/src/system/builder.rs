@@ -17,7 +17,7 @@ use crate::{
 };
 use core::fmt::Debug;
 
-use super::{init_query_param, QueryParamState, Res, ResMut, SystemState};
+use super::{QueryParamState, Res, ResMut, SystemState};
 
 /// A builder that can create a [`SystemParam`].
 ///
@@ -209,10 +209,9 @@ impl ParamBuilder {
 unsafe impl<'w, 's, D: QueryData + 'static, F: QueryFilter + 'static>
     SystemParamBuilder<Query<'w, 's, D, F>> for QueryState<D, F>
 {
-    fn build(self, world: &mut World, system_meta: &mut SystemMeta) -> QueryState<D, F> {
+    fn build(self, world: &mut World) -> QueryParamState<D, F> {
         self.validate_world(world.id());
-        init_query_param(world, system_meta, &self);
-        self
+        QueryParamState::Raw(Some(self))
     }
 }
 
@@ -289,12 +288,11 @@ unsafe impl<
         T: FnOnce(&mut QueryBuilder<D, F>),
     > SystemParamBuilder<Query<'w, 's, D, F>> for QueryParamBuilder<T>
 {
-    fn build(self, world: &mut World, system_meta: &mut SystemMeta) -> QueryState<D, F> {
+    fn build(self, world: &mut World) -> QueryParamState<D, F> {
         let mut builder = QueryBuilder::new(world);
         (self.0)(&mut builder);
         let state = builder.build();
-        init_query_param(world, system_meta, &state);
-        state
+        QueryParamState::Raw(Some(state))
     }
 }
 

@@ -34,7 +34,6 @@ use core::{
 };
 use disqualified::ShortName;
 use log::warn;
-use std::println;
 use thiserror::Error;
 
 use super::Populated;
@@ -373,7 +372,8 @@ unsafe impl<D: QueryData + 'static, F: QueryFilter + 'static> SystemParam for Qu
     type Item<'w, 's> = Query<'w, 's, D, F>;
 
     fn init_state(world: &mut World) -> Self::State {
-        QueryState::new(world)
+        let state = QueryState::new(world);
+        QueryParamState::Raw(Some(state))
     }
 
     fn init_access(
@@ -382,6 +382,20 @@ unsafe impl<D: QueryData + 'static, F: QueryFilter + 'static> SystemParam for Qu
         component_access_set: &mut FilteredAccessSet<ComponentId>,
         world: &mut World,
     ) {
+        let state = match state {
+            QueryParamState::Raw(state) => state.as_ref().unwrap(),
+            QueryParamState::Cached(cached) => {
+                // SAFETY: CachedQueryState must be valid.
+                unsafe {
+                    cached
+                        .fetch_mut_from_world(world.as_unsafe_world_cell_readonly())
+                        .debug_checked_unwrap()
+                }
+            }
+            QueryParamState::Invalid => {
+                panic!("tring to using an invalid QueryState")
+            }
+        };
         assert_component_access_compatibility(
             &system_meta.name,
             core::any::type_name::<D>(),
@@ -404,12 +418,7 @@ unsafe impl<D: QueryData + 'static, F: QueryFilter + 'static> SystemParam for Qu
             QueryParamState::Raw(state) => state.as_mut().debug_checked_unwrap(),
             QueryParamState::Cached(cached) => {
                 // SAFETY: CachedQueryState must be valid.
-                let state = unsafe {
-                    cached
-                        .clone()
-                        .fetch_mut_from_world(world)
-                        .debug_checked_unwrap()
-                };
+                let state = unsafe { cached.fetch_mut_from_world(world).debug_checked_unwrap() };
                 // SAFETY: The transmute is only used for changing the lifetime,
                 // The `state` maintains the same lifetime as `world` throughout query system's execution.
                 unsafe { core::mem::transmute(state) }
@@ -424,6 +433,12 @@ unsafe impl<D: QueryData + 'static, F: QueryFilter + 'static> SystemParam for Qu
         // The caller ensures the world matches the one used in init_state.
         unsafe { state.query_unchecked_with_ticks(world, system_meta.last_run, change_tick) }
     }
+
+    fn cached(state: &mut Self::State, world: &mut World) -> bool {
+        state.cached(world)
+    }
+
+    fn cleanup(state: &mut Self::State, world: &mut World) {}
 }
 
 fn assert_component_access_compatibility(
@@ -434,7 +449,7 @@ fn assert_component_access_compatibility(
     current: &FilteredAccess<ComponentId>,
     world: &World,
 ) {
-    let conflicts = system_access.get_conflicts_single(current);
+    let conflicts: crate::query::AccessConflicts = system_access.get_conflicts_single(current);
     if conflicts.is_empty() {
         return;
     }
@@ -564,8 +579,7 @@ unsafe impl<D: QueryData + 'static, F: QueryFilter + 'static> SystemParam
     }
 
     fn cached(state: &mut Self::State, world: &mut World) -> bool {
-        state.cached(world);
-        true
+        state.cached(world)
     }
 }
 

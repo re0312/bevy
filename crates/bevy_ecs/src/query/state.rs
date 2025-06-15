@@ -27,7 +27,7 @@ use super::{
 };
 
 #[derive(Copy)]
-pub struct CachedQueryState<D: QueryData, F: QueryFilter = ()> {
+pub(crate) struct CachedQueryState<D: QueryData, F: QueryFilter = ()> {
     pub(crate) entity: Entity,
     pub(crate) _marker: PhantomData<(D, F)>,
 }
@@ -35,7 +35,7 @@ pub struct CachedQueryState<D: QueryData, F: QueryFilter = ()> {
 impl<D: QueryData + 'static, F: QueryFilter + 'static> CachedQueryState<D, F> {
     #[inline]
     pub(crate) unsafe fn fetch_mut_from_world<'w>(
-        self,
+        &self,
         world: UnsafeWorldCell<'w>,
     ) -> Option<&'w mut QueryState<D, F>> {
         let id = world
@@ -63,6 +63,7 @@ impl<D: QueryData + 'static, F: QueryFilter + 'static> CachedQueryState<D, F> {
 }
 
 impl<D: QueryData, F: QueryFilter> Clone for CachedQueryState<D, F> {
+    #[inline]
     fn clone(&self) -> Self {
         Self {
             entity: self.entity,
