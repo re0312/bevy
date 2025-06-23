@@ -15,7 +15,8 @@ use crate::entity::UniqueEntityEquivalentSlice;
 
 use alloc::vec::Vec;
 use bevy_utils::prelude::DebugName;
-use core::{fmt, ptr};
+use core::{any::TypeId, fmt, marker::PhantomData, ptr};
+use derive_more::derive::{Deref, DerefMut};
 use fixedbitset::FixedBitSet;
 use log::warn;
 #[cfg(feature = "trace")]
@@ -25,14 +26,18 @@ use super::{
     NopWorldQuery, QueryBuilder, QueryData, QueryEntityError, QueryFilter, QueryManyIter,
     QueryManyUniqueIter, QuerySingleError, ROQueryItem, ReadOnlyQueryData,
 };
-
+/// Stores a [`QueryState`] in the ECS world for efficient update.
 #[derive(Copy)]
-pub(crate) struct CachedQueryState<D: QueryData, F: QueryFilter = ()> {
+pub struct CachedQueryState<D: QueryData, F: QueryFilter = ()> {
     pub(crate) entity: Entity,
     pub(crate) _marker: PhantomData<(D, F)>,
 }
 
 impl<D: QueryData + 'static, F: QueryFilter + 'static> CachedQueryState<D, F> {
+    /// fetches a mutable reference to the query state from the world.
+    ///
+    /// # Safety
+    /// - Caller must ensure no other references to the [`QueryState`]` exist.
     #[inline]
     pub(crate) unsafe fn fetch_mut_from_world<'w>(
         &self,
@@ -73,11 +78,13 @@ impl<D: QueryData, F: QueryFilter> Clone for CachedQueryState<D, F> {
 }
 
 impl<D: QueryData, F: QueryFilter> CachedQueryState<D, F> {
+    /// Returns the entity ID associated with this [`CachedQueryState`].
     #[inline]
     pub fn id(&self) -> Entity {
         self.entity
     }
 }
+
 // SAFETY: All members are Send
 unsafe impl<D: QueryData, F: QueryFilter> Send for CachedQueryState<D, F> {}
 // SAFETY: All members are Send
@@ -86,8 +93,9 @@ unsafe impl<D: QueryData, F: QueryFilter> Sync for CachedQueryState<D, F> {}
 #[repr(C)]
 #[derive(Component, Deref, DerefMut)]
 #[component(storage = "SparseSet", immutable)]
-/// A Internal Wrapper of [`QueryState`] for safety reasons.
+/// A Internal Wrapper of [`QueryState`] that prevents direct user access.
 pub(crate) struct InternalQueryState<D: QueryData, F: QueryFilter>(QueryState<D, F>);
+
 /// An ID for either a table or an archetype. Used for Query iteration.
 ///
 /// Query iteration is exclusively dense (over tables) or archetypal (over archetypes) based on whether
