@@ -335,7 +335,7 @@ pub enum QueryParamState<D: QueryData, F: QueryFilter = ()> {
     Raw(Option<QueryState<D, F>>),
     /// Reprents its raw [`QueryState`] has cached into a world.
     Cached(CachedQueryState<D, F>),
-    /// Invalid marker.
+    /// Marks the query as permanently unusable.
     Invalid,
 }
 
