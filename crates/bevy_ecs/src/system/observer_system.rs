@@ -180,6 +180,14 @@ where
     fn default_system_sets(&self) -> Vec<crate::schedule::InternedSystemSet> {
         self.observer.default_system_sets()
     }
+
+    fn cached(&mut self, world: &mut World) {
+        self.observer.cached(world);
+    }
+
+    fn cleanup(&mut self, world: &mut World) {
+        self.observer.cleanup(world);
+    }
 }
 
 #[cfg(test)]

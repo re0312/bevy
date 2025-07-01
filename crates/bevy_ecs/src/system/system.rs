@@ -197,10 +197,9 @@ pub trait System: Send + Sync + 'static {
     fn set_last_run(&mut self, last_run: Tick);
 
     /// Cache system internal state into World if necessary.
-    fn cached(&mut self, _world: &mut World) {}
-
+    fn cached(&mut self, world: &mut World);
     /// Clean up system Internal state cache if necessary.
-    fn cleanup(&mut self, _world: &mut World) {}
+    fn cleanup(&mut self, world: &mut World);
 }
 
 /// [`System`] types that do not modify the [`World`] when run.

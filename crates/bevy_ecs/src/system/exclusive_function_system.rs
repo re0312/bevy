@@ -198,6 +198,10 @@ where
     fn set_last_run(&mut self, last_run: Tick) {
         self.system_meta.last_run = last_run;
     }
+
+    fn cached(&mut self, _world: &mut World) {}
+
+    fn cleanup(&mut self, _world: &mut World) {}
 }
 
 /// A trait implemented for all exclusive system functions that can be used as [`System`]s.

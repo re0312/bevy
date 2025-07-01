@@ -217,6 +217,10 @@ impl System for ApplyDeferred {
     }
 
     fn set_last_run(&mut self, _last_run: Tick) {}
+
+    fn cached(&mut self, _world: &mut World) {}
+
+    fn cleanup(&mut self, _world: &mut World) {}
 }
 
 impl IntoSystemSet<()> for ApplyDeferred {
