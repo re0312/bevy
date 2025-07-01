@@ -27,10 +27,10 @@ use super::{
     QueryManyUniqueIter, QuerySingleError, ROQueryItem, ReadOnlyQueryData,
 };
 /// Stores a [`QueryState`] in the ECS world for efficient update.
-#[derive(Copy)]
+#[derive(Clone, Copy)]
 pub struct CachedQueryState<D: QueryData, F: QueryFilter = ()> {
     pub(crate) entity: Entity,
-    pub(crate) _marker: PhantomData<(D, F)>,
+    pub(crate) _marker: PhantomData<fn() -> (D, F)>,
 }
 
 impl<D: QueryData + 'static, F: QueryFilter + 'static> CachedQueryState<D, F> {
@@ -67,16 +67,6 @@ impl<D: QueryData + 'static, F: QueryFilter + 'static> CachedQueryState<D, F> {
     }
 }
 
-impl<D: QueryData, F: QueryFilter> Clone for CachedQueryState<D, F> {
-    #[inline]
-    fn clone(&self) -> Self {
-        Self {
-            entity: self.entity,
-            _marker: PhantomData::default(),
-        }
-    }
-}
-
 impl<D: QueryData, F: QueryFilter> CachedQueryState<D, F> {
     /// Returns the entity ID associated with this [`CachedQueryState`].
     #[inline]
@@ -84,12 +74,6 @@ impl<D: QueryData, F: QueryFilter> CachedQueryState<D, F> {
         self.entity
     }
 }
-
-// SAFETY: All members are Send
-unsafe impl<D: QueryData, F: QueryFilter> Send for CachedQueryState<D, F> {}
-// SAFETY: All members are Send
-unsafe impl<D: QueryData, F: QueryFilter> Sync for CachedQueryState<D, F> {}
-
 #[repr(C)]
 #[derive(Component, Deref, DerefMut)]
 #[component(storage = "SparseSet", immutable)]
